@@ -144,6 +144,12 @@ Pi's `/supervision-model` command pins a cheaper model and a shallower reasoning
 
 Setup guides for tmux (the default) and every other supported backend (herdr, zellij, Orca, cmux) are linked in [Documentation](#documentation) below.
 
+### Local GUI
+
+Prefer a browser to a terminal? `bin/fm-gui.sh --open` starts a local chat
+page for talking to first mate. See [gui/README.md](gui/README.md) for what
+it does and its safety notes.
+
 ## How It Works
 
 ```
