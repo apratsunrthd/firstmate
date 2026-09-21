@@ -6,11 +6,17 @@ terminal.
 ## What it is
 
 `server.py` is a dependency-free Python HTTP server. Each message you send in
-the browser runs `claude -p "<message>" --output-format json --resume <id>`
-from this repo's root, so that headless session loads this repo's `AGENTS.md`
-and behaves as First Mate exactly as an interactive terminal session would.
-`--resume` keeps the same conversation going across messages; the session id
-is cached in `state/gui-session.json` (gitignored).
+the browser runs `claude -p "<message>" --output-format stream-json --verbose
+--resume <id>` from this repo's root, so that headless session loads this
+repo's `AGENTS.md` and behaves as First Mate exactly as an interactive
+terminal session would. `--resume` keeps the same conversation going across
+messages; the session id is cached in `state/gui-session.json` (gitignored).
+
+The server relays that stream to the browser as it arrives (chunked
+newline-delimited JSON, one status update per tool call), so the reply bubble
+shows live activity - e.g. "Running Bash: git status" - instead of sitting on
+a static "thinking..." with no feedback while `claude` works. The final chunk
+carries the rendered reply.
 
 This is a separate First Mate session from any terminal session you have
 open elsewhere - it doesn't share conversation history with them, though it
@@ -22,6 +28,13 @@ indicator in the header polls `/api/fleet` every 5s, which reads
 fanned out, their project, harness/model, and latest status line - click it
 to expand the list. It reflects the fleet of whichever First Mate home this
 repo's `state/` belongs to, not just this GUI session.
+
+**This counter is about background ship/scout crew, not the chat itself.**
+The conversation turn you're waiting on runs as the headless `claude`
+process directly - it never writes a `state/*.meta` file for itself, only
+work it explicitly spawns does. So "Fleet: 0" while a reply is in progress is
+expected, not a bug; watch the message bubble's live status for that turn's
+own progress instead.
 
 ## Run it
 
@@ -46,8 +59,9 @@ Override the port with `FM_GUI_PORT`.
 
 ## Limits
 
-Single-user, single conversation at a time, no auth, no streaming (each
-message blocks until `claude` returns a full reply), and the message log is
-only kept in the browser tab - reloading the page clears it (the underlying
-`claude` session and its history are unaffected). Good enough for a local
-prototype; not meant to be exposed beyond your own machine.
+Single-user, single conversation at a time, no auth. Progress streams as
+tool-call status lines (e.g. "Running Bash: ..."), not token-by-token text -
+the full reply still appears in one piece once `claude` finishes. The message
+log is only kept in the browser tab - reloading the page clears it (the
+underlying `claude` session and its history are unaffected). Good enough for
+a local prototype; not meant to be exposed beyond your own machine.

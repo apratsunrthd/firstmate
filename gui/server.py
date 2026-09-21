@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -53,33 +54,112 @@ def clear_session():
     SESSION_FILE.unlink(missing_ok=True)
 
 
-def run_claude(message, session_id):
+def _tool_hint(block):
+    """Short human-readable summary of a tool_use block's input, e.g. the
+    command for Bash or the path for Read/Edit/Write."""
+    inp = block.get("input") or {}
+    for key in ("command", "file_path", "path", "pattern", "url", "query"):
+        val = inp.get(key)
+        if val:
+            val = str(val)
+            if len(val) > 60:
+                val = val[:57] + "..."
+            return f": {val}"
+    return ""
+
+
+def stream_claude(message, session_id):
+    """Run claude headlessly with streaming JSON output, yielding progress
+    dicts ({"status": "..."}) as tool calls happen so the caller can show
+    live activity instead of a silent block. Always ends by yielding exactly
+    one terminal dict shaped {"final": True, "reply": ..., "session_id": ...}
+    or {"final": True, "error": "..."}.
+    """
     claude_bin = shutil.which("claude")
     if not claude_bin:
-        raise RuntimeError(
-            "claude CLI not found on PATH. Install Claude Code and make sure "
-            "`claude` is runnable before using this GUI."
-        )
+        yield {
+            "final": True,
+            "error": (
+                "claude CLI not found on PATH. Install Claude Code and make "
+                "sure `claude` is runnable before using this GUI."
+            ),
+        }
+        return
+
     cmd = [
         claude_bin,
         "-p",
         message,
         "--output-format",
-        "json",
+        "stream-json",
+        "--verbose",
         "--dangerously-skip-permissions",
     ]
     if session_id:
         cmd += ["--resume", session_id]
-    proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+
+    proc = subprocess.Popen(
+        cmd,
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+
+    stderr_lines = []
+
+    def drain_stderr():
+        for line in proc.stderr:
+            stderr_lines.append(line)
+
+    stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+    stderr_thread.start()
+
+    seen_hook = False
+    last_tool = None
+
+    for line in proc.stdout:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        obj_type = obj.get("type")
+        if obj_type == "system":
+            if not seen_hook and obj.get("subtype") == "hook_started":
+                seen_hook = True
+                yield {"status": "Running startup checks..."}
+        elif obj_type == "assistant":
+            for block in (obj.get("message") or {}).get("content") or []:
+                if block.get("type") == "tool_use":
+                    last_tool = block.get("name") or "tool"
+                    yield {"status": f"Running {last_tool}{_tool_hint(block)}"}
+                elif block.get("type") == "text" and (block.get("text") or "").strip():
+                    yield {"status": "Writing reply..."}
+        elif obj_type == "user":
+            for block in (obj.get("message") or {}).get("content") or []:
+                if block.get("type") == "tool_result" and last_tool:
+                    yield {"status": f"Finished {last_tool}"}
+        elif obj_type == "result":
+            new_session_id = obj.get("session_id") or session_id
+            if obj.get("is_error"):
+                yield {"final": True, "error": obj.get("result") or "claude reported an error"}
+            else:
+                yield {"final": True, "reply": obj.get("result") or "", "session_id": new_session_id}
+            proc.wait()
+            stderr_thread.join(timeout=2)
+            return
+
+    proc.wait()
+    stderr_thread.join(timeout=2)
     if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or f"claude exited {proc.returncode}")
-    try:
-        payload = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        return proc.stdout.strip(), session_id
-    reply = payload.get("result") or proc.stdout.strip()
-    new_session_id = payload.get("session_id") or session_id
-    return reply, new_session_id
+        yield {"final": True, "error": "".join(stderr_lines).strip() or f"claude exited {proc.returncode}"}
+    else:
+        yield {"final": True, "error": "claude produced no result (stream ended without a result event)"}
 
 
 def read_meta(path):
@@ -129,6 +209,8 @@ def fleet_snapshot():
 
 
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"  # required for chunked responses below
+
     def _send_json(self, obj, status=200):
         body = json.dumps(obj).encode("utf-8")
         self.send_response(status)
@@ -136,6 +218,23 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _start_ndjson_stream(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+
+    def _write_chunk(self, obj):
+        data = (json.dumps(obj) + "\n").encode("utf-8")
+        self.wfile.write(("%x\r\n" % len(data)).encode("ascii"))
+        self.wfile.write(data)
+        self.wfile.write(b"\r\n")
+        self.wfile.flush()
+
+    def _end_ndjson_stream(self):
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
 
     def _serve_static(self, rel_path):
         target = (STATIC_DIR / rel_path).resolve()
@@ -176,14 +275,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": "empty message"}, 400)
                 return
             session_id = load_session_id()
+            self._start_ndjson_stream()
             try:
-                reply, new_session_id = run_claude(message, session_id)
-            except RuntimeError as exc:
-                self._send_json({"error": str(exc)}, 500)
-                return
-            if new_session_id:
-                save_session_id(new_session_id)
-            self._send_json({"reply": reply})
+                for event in stream_claude(message, session_id):
+                    self._write_chunk(event)
+                    if event.get("final") and event.get("session_id"):
+                        save_session_id(event["session_id"])
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # client navigated away mid-stream
+            finally:
+                self._end_ndjson_stream()
         elif self.path == "/api/reset":
             clear_session()
             self._send_json({"ok": True})
