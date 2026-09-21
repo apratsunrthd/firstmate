@@ -208,7 +208,7 @@
       <div class="sub">local session &middot; this repo</div>
     </div>
     <div class="right">
-      <button id="fleet-toggle"><span id="fleet-dot"></span><span id="fleet-label">Fleet: -</span></button>
+      <button id="fleet-toggle" title="Background ship/scout crew only - most chat replies never spawn one, so 0 is normal"><span id="fleet-dot"></span><span id="fleet-label">Fleet: -</span></button>
       <button id="reset">New conversation</button>
     </div>
     <div id="fleet-panel"></div>
@@ -328,11 +328,40 @@ async function send(message) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message }),
     });
-    const data = await res.json();
-    if (!res.ok || data.error) {
+    if (!res.ok || !res.body) {
+      const data = await res.json().catch(() => ({}));
       setPendingText(pending, data.error || ('request failed: ' + res.status), { error: true });
-    } else {
-      setPendingText(pending, data.reply);
+      return;
+    }
+    // Server streams newline-delimited JSON progress events, then exactly
+    // one final event ({final: true, reply | error}). Live status updates
+    // replace the "thinking..." text so tool activity is visible as it runs.
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let sawFinal = false;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (!line) continue;
+        let evt;
+        try { evt = JSON.parse(line); } catch { continue; }
+        if (evt.final) {
+          sawFinal = true;
+          if (evt.error) setPendingText(pending, evt.error, { error: true });
+          else setPendingText(pending, evt.reply || '');
+        } else if (evt.status) {
+          pending.textContent = evt.status;
+        }
+      }
+    }
+    if (!sawFinal) {
+      setPendingText(pending, 'connection closed before a reply arrived', { error: true });
     }
   } catch (err) {
     setPendingText(pending, 'connection error: ' + err.message, { error: true });
@@ -389,7 +418,7 @@ async function refreshFleet() {
     fleetToggle.classList.toggle('active', count > 0);
     fleetPanel.innerHTML = count
       ? data.tasks.map(fleetRowHtml).join('')
-      : '<div class="empty">No active work - the fleet is idle.</div>';
+      : '<div class="empty">No background crew running. This only counts spawned ship/scout tasks, not the chat reply itself - watch the message bubble for live status while First Mate is working on this conversation turn.</div>';
   } catch (err) {
     fleetLabel.textContent = 'Fleet: unavailable';
     fleetToggle.classList.remove('active');
