@@ -16,6 +16,13 @@ This is a separate First Mate session from any terminal session you have
 open elsewhere - it doesn't share conversation history with them, though it
 reads and can act on the same repo state (backlog, projects, fleet).
 
+Replies render as markdown (headers, lists, code blocks, links). The "Fleet"
+indicator in the header polls `/api/fleet` every 5s, which reads
+`state/*.meta` directly (read-only) to show how many tasks are currently
+fanned out, their project, harness/model, and latest status line - click it
+to expand the list. It reflects the fleet of whichever First Mate home this
+repo's `state/` belongs to, not just this GUI session.
+
 ## Run it
 
 ```sh

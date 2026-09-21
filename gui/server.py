@@ -7,6 +7,10 @@ repo's AGENTS.md and behaves as First Mate. Conversation continuity across
 messages is kept with `claude --resume`; the session id is cached in
 state/gui-session.json (gitignored) between requests.
 
+Also serves /api/fleet, a read-only snapshot of state/*.meta so the GUI can
+show how much work is currently fanned out (task count, project, harness/
+model, latest status line) alongside the chat.
+
 Run: python3 gui/server.py   (see gui/README.md)
 """
 import json
@@ -20,6 +24,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 SESSION_FILE = REPO_ROOT / "state" / "gui-session.json"
+STATE_DIR = REPO_ROOT / "state"
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("FM_GUI_PORT", "8756"))
 
@@ -77,6 +82,52 @@ def run_claude(message, session_id):
     return reply, new_session_id
 
 
+def read_meta(path):
+    """Parse a state/<id>.meta key=value file. Last value wins per key,
+    matching fm_meta_get's semantics in bin/fm-backend.sh."""
+    data = {}
+    try:
+        for line in path.read_text().splitlines():
+            if "=" in line:
+                key, _, value = line.partition("=")
+                data[key] = value
+    except OSError:
+        pass
+    return data
+
+
+def latest_status_line(task_id):
+    status_file = STATE_DIR / f"{task_id}.status"
+    if not status_file.is_file():
+        return None
+    try:
+        lines = [ln for ln in status_file.read_text().splitlines() if ln.strip()]
+    except OSError:
+        return None
+    return lines[-1] if lines else None
+
+
+def fleet_snapshot():
+    tasks = []
+    if STATE_DIR.is_dir():
+        for meta_path in sorted(STATE_DIR.glob("*.meta")):
+            task_id = meta_path.stem
+            meta = read_meta(meta_path)
+            tasks.append(
+                {
+                    "id": task_id,
+                    "project": meta.get("project") or meta.get("home") or "-",
+                    "kind": meta.get("kind") or "ship",
+                    "harness": meta.get("harness") or "-",
+                    "model": meta.get("model") or "-",
+                    "mode": meta.get("mode") or "-",
+                    "backend": meta.get("backend") or "tmux",
+                    "latest": latest_status_line(task_id),
+                }
+            )
+    return {"tasks": tasks, "count": len(tasks)}
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send_json(self, obj, status=200):
         body = json.dumps(obj).encode("utf-8")
@@ -107,6 +158,8 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_static("index.html")
         elif self.path.startswith("/static/"):
             self._serve_static(self.path[len("/static/"):])
+        elif self.path == "/api/fleet":
+            self._send_json(fleet_snapshot())
         else:
             self.send_error(404)
 
