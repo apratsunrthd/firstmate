@@ -15,6 +15,7 @@
     --accent: #3d8bfd;
     --you-bubble: #234b8a;
     --fm-bubble: #1f2a35;
+    --code-bg: #0c141c;
   }
   * { box-sizing: border-box; }
   body {
@@ -32,6 +33,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 12px;
+    position: relative;
   }
   header h1 {
     font-size: 16px;
@@ -43,6 +46,11 @@
     font-size: 12px;
     margin-top: 2px;
   }
+  header .right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
   header button {
     background: transparent;
     color: var(--muted);
@@ -53,6 +61,62 @@
     cursor: pointer;
   }
   header button:hover { color: var(--text); border-color: var(--accent); }
+
+  #fleet-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  #fleet-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--muted);
+  }
+  #fleet-toggle.active #fleet-dot { background: #3ddc84; }
+  #fleet-panel {
+    display: none;
+    position: absolute;
+    top: 54px;
+    right: 20px;
+    width: 420px;
+    max-width: calc(100vw - 40px);
+    max-height: 320px;
+    overflow-y: auto;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    z-index: 10;
+    font-size: 12px;
+  }
+  #fleet-panel.open { display: block; }
+  #fleet-panel .empty { color: var(--muted); padding: 6px 4px; }
+  .fleet-row {
+    padding: 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    margin-bottom: 6px;
+  }
+  .fleet-row:last-child { margin-bottom: 0; }
+  .fleet-row .id {
+    font-weight: 600;
+    font-family: ui-monospace, SFMono-Regular, monospace;
+  }
+  .fleet-row .meta-line {
+    color: var(--muted);
+    margin-top: 2px;
+  }
+  .fleet-row .meta-line span { margin-right: 10px; }
+  .fleet-row .latest {
+    margin-top: 4px;
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
   #log {
     flex: 1;
     overflow-y: auto;
@@ -65,14 +129,14 @@
     max-width: 72ch;
     padding: 10px 14px;
     border-radius: 10px;
-    white-space: pre-wrap;
-    word-wrap: break-word;
-    line-height: 1.45;
+    line-height: 1.5;
     font-size: 14px;
   }
   .you {
     align-self: flex-end;
     background: var(--you-bubble);
+    white-space: pre-wrap;
+    word-wrap: break-word;
   }
   .fm {
     align-self: flex-start;
@@ -81,6 +145,31 @@
   }
   .fm.pending { color: var(--muted); font-style: italic; }
   .fm.error { border-color: #a13b3b; color: #ff9d9d; }
+
+  .fm p { margin: 0 0 10px; }
+  .fm p:last-child { margin-bottom: 0; }
+  .fm h1, .fm h2, .fm h3, .fm h4 { margin: 14px 0 8px; line-height: 1.3; }
+  .fm h1:first-child, .fm h2:first-child, .fm h3:first-child { margin-top: 0; }
+  .fm ul, .fm ol { margin: 0 0 10px; padding-left: 22px; }
+  .fm li { margin: 2px 0; }
+  .fm code {
+    background: var(--code-bg);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 0.9em;
+  }
+  .fm pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    overflow-x: auto;
+    margin: 0 0 10px;
+  }
+  .fm pre code { background: none; padding: 0; }
+  .fm a { color: var(--accent); }
+
   form {
     display: flex;
     gap: 10px;
@@ -118,7 +207,11 @@
       <h1>First Mate</h1>
       <div class="sub">local session &middot; this repo</div>
     </div>
-    <button id="reset">New conversation</button>
+    <div class="right">
+      <button id="fleet-toggle"><span id="fleet-dot"></span><span id="fleet-label">Fleet: -</span></button>
+      <button id="reset">New conversation</button>
+    </div>
+    <div id="fleet-panel"></div>
   </header>
   <div id="log"></div>
   <form id="form">
@@ -131,14 +224,98 @@ const form = document.getElementById('form');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
 const resetBtn = document.getElementById('reset');
+const fleetToggle = document.getElementById('fleet-toggle');
+const fleetLabel = document.getElementById('fleet-label');
+const fleetPanel = document.getElementById('fleet-panel');
+
+// --- minimal markdown renderer (headers, bold/italic, inline code, fenced
+// code blocks, links, lists, paragraphs) - escapes HTML first so raw text
+// can never inject markup. ---
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function inlineMd(text) {
+  text = escapeHtml(text);
+  text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+  text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  text = text.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>');
+  text = text.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  return text;
+}
+
+function renderMarkdown(src) {
+  const lines = src.replace(/\r\n/g, '\n').split('\n');
+  let html = '';
+  let inCode = false, codeBuf = [];
+  let listType = null;
+  let paraBuf = [];
+
+  const flushPara = () => {
+    if (paraBuf.length) { html += '<p>' + inlineMd(paraBuf.join(' ')) + '</p>'; paraBuf = []; }
+  };
+  const closeList = () => {
+    if (listType) { html += '</' + listType + '>'; listType = null; }
+  };
+
+  for (const line of lines) {
+    if (line.trim().startsWith('```')) {
+      if (!inCode) { flushPara(); closeList(); inCode = true; codeBuf = []; }
+      else { html += '<pre><code>' + escapeHtml(codeBuf.join('\n')) + '</code></pre>'; inCode = false; }
+      continue;
+    }
+    if (inCode) { codeBuf.push(line); continue; }
+
+    const h = line.match(/^(#{1,6})\s+(.*)$/);
+    if (h) {
+      flushPara(); closeList();
+      const level = h[1].length;
+      html += `<h${level}>${inlineMd(h[2])}</h${level}>`;
+      continue;
+    }
+
+    const ul = line.match(/^\s*[-*]\s+(.*)$/);
+    const ol = line.match(/^\s*\d+\.\s+(.*)$/);
+    if (ul) {
+      flushPara();
+      if (listType !== 'ul') { closeList(); html += '<ul>'; listType = 'ul'; }
+      html += '<li>' + inlineMd(ul[1]) + '</li>';
+      continue;
+    }
+    if (ol) {
+      flushPara();
+      if (listType !== 'ol') { closeList(); html += '<ol>'; listType = 'ol'; }
+      html += '<li>' + inlineMd(ol[1]) + '</li>';
+      continue;
+    }
+    closeList();
+
+    if (line.trim() === '') { flushPara(); continue; }
+    paraBuf.push(line.trim());
+  }
+  if (inCode) html += '<pre><code>' + escapeHtml(codeBuf.join('\n')) + '</code></pre>';
+  flushPara();
+  closeList();
+  return html;
+}
 
 function addMessage(role, text, opts = {}) {
   const el = document.createElement('div');
   el.className = 'msg ' + role + (opts.pending ? ' pending' : '') + (opts.error ? ' error' : '');
-  el.textContent = text;
+  if (role === 'fm' && !opts.pending && !opts.error) {
+    el.innerHTML = renderMarkdown(text);
+  } else {
+    el.textContent = text;
+  }
   log.appendChild(el);
   log.scrollTop = log.scrollHeight;
   return el;
+}
+
+function setPendingText(el, text, { error = false } = {}) {
+  el.classList.remove('pending');
+  if (error) { el.classList.add('error'); el.textContent = text; }
+  else { el.innerHTML = renderMarkdown(text); }
 }
 
 async function send(message) {
@@ -152,20 +329,17 @@ async function send(message) {
       body: JSON.stringify({ message }),
     });
     const data = await res.json();
-    pending.classList.remove('pending');
     if (!res.ok || data.error) {
-      pending.classList.add('error');
-      pending.textContent = data.error || ('request failed: ' + res.status);
+      setPendingText(pending, data.error || ('request failed: ' + res.status), { error: true });
     } else {
-      pending.textContent = data.reply;
+      setPendingText(pending, data.reply);
     }
   } catch (err) {
-    pending.classList.remove('pending');
-    pending.classList.add('error');
-    pending.textContent = 'connection error: ' + err.message;
+    setPendingText(pending, 'connection error: ' + err.message, { error: true });
   } finally {
     sendBtn.disabled = false;
     input.focus();
+    refreshFleet();
   }
 }
 
@@ -189,6 +363,46 @@ resetBtn.addEventListener('click', async () => {
   log.innerHTML = '';
   addMessage('fm', 'New conversation started.');
 });
+
+// --- fleet fan-out status: how many tasks are running, what they're doing,
+// which model/harness, polled from state/*.meta via /api/fleet. ---
+function fleetRowHtml(task) {
+  const latest = task.latest ? escapeHtml(task.latest) : 'no status yet';
+  return `<div class="fleet-row">
+    <div class="id">${escapeHtml(task.id)} <span style="color:var(--muted); font-weight:400;">(${escapeHtml(task.kind)})</span></div>
+    <div class="meta-line">
+      <span>project: ${escapeHtml(task.project)}</span>
+      <span>harness: ${escapeHtml(task.harness)}</span>
+      <span>model: ${escapeHtml(task.model)}</span>
+    </div>
+    <div class="latest">${latest}</div>
+  </div>`;
+}
+
+async function refreshFleet() {
+  try {
+    const res = await fetch('/api/fleet');
+    if (!res.ok) throw new Error('status ' + res.status);
+    const data = await res.json();
+    const count = data.count || 0;
+    fleetLabel.textContent = 'Fleet: ' + count + (count === 1 ? ' task' : ' tasks');
+    fleetToggle.classList.toggle('active', count > 0);
+    fleetPanel.innerHTML = count
+      ? data.tasks.map(fleetRowHtml).join('')
+      : '<div class="empty">No active work - the fleet is idle.</div>';
+  } catch (err) {
+    fleetLabel.textContent = 'Fleet: unavailable';
+    fleetToggle.classList.remove('active');
+    fleetPanel.innerHTML = `<div class="empty">Could not read fleet state: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+fleetToggle.addEventListener('click', () => {
+  fleetPanel.classList.toggle('open');
+});
+
+refreshFleet();
+setInterval(refreshFleet, 5000);
 </script>
 </body>
 </html>
